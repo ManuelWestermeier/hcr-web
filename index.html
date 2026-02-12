@@ -253,16 +253,36 @@
       function drawTerrain(cameraX, cameraY) {
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
-        ctx.strokeStyle = '#5cd17d';
-        ctx.lineWidth = 12;
-        ctx.beginPath();
+
         const start = cameraX - 220;
         const end = cameraX + state.viewport.width + 260;
+
+        ctx.beginPath();
         for (let x = start; x <= end; x += 20) {
           const y = terrainHeight(x) - cameraY;
           if (x === start) ctx.moveTo(x - cameraX, y);
           else ctx.lineTo(x - cameraX, y);
         }
+
+        const firstY = terrainHeight(start) - cameraY;
+        ctx.lineTo(end - cameraX, state.viewport.height + 220);
+        ctx.lineTo(start - cameraX, state.viewport.height + 220);
+        ctx.lineTo(start - cameraX, firstY);
+
+        const fill = ctx.createLinearGradient(0, state.viewport.height * 0.45, 0, state.viewport.height + 120);
+        fill.addColorStop(0, '#4aa964');
+        fill.addColorStop(1, '#2d5f3a');
+        ctx.fillStyle = fill;
+        ctx.fill();
+
+        ctx.beginPath();
+        for (let x = start; x <= end; x += 20) {
+          const y = terrainHeight(x) - cameraY;
+          if (x === start) ctx.moveTo(x - cameraX, y);
+          else ctx.lineTo(x - cameraX, y);
+        }
+        ctx.strokeStyle = '#8df0ab';
+        ctx.lineWidth = 7;
         ctx.stroke();
       }
 
