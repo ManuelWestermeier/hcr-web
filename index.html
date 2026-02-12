@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hill Climb Web</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, sans-serif;
+        background: #0d1424;
+        overflow: hidden;
+      }
+      canvas { display: block; }
+      .hud {
+        position: fixed; inset: 0 0 auto 0;
+        display: flex; justify-content: space-between; gap: .8rem;
+        padding: .8rem 1rem; pointer-events: none; color: #e6f2ff;
+      }
+      .panel {
+        display: flex; gap: 1rem; flex-wrap: wrap;
+        background: rgba(7,14,28,.55);
+        border: 1px solid rgba(168,209,255,.25);
+        border-radius: 12px; padding: .45rem .7rem;
+      }
+      .label { opacity: .75; font-size: .78rem; }
+      .value { font-weight: 700; }
+      .overlay { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
+      .message {
+        max-width: min(92vw, 620px); text-align: center;
+        background: rgba(10,17,32,.72); border: 1px solid rgba(167,216,255,.35);
+        border-radius: 14px; padding: 1rem 1.2rem; color: #eff8ff;
+      }
+      .hidden { opacity: 0; }
+      kbd { border: 1px solid rgba(207,230,255,.45); border-radius: 6px; padding: .05rem .35rem; background: rgba(255,255,255,.08); }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div class="hud">
+      <div class="panel">
+        <div><div class="label">Distanz</div><div class="value" id="distance">0 m</div></div>
+        <div><div class="label">Schwierigkeit</div><div class="value" id="difficulty">1.00x</div></div>
+        <div><div class="label">Speed</div><div class="value" id="speed">0 km/h</div></div>
+      </div>
+      <div class="panel"><div><div class="label">Steuerung</div><div class="value"><kbd>←</kbd>/<kbd>→</kbd> fahren, <kbd>A</kbd>/<kbd>D</kbd> kippen, <kbd>R</kbd> reset</div></div></div>
+    </div>
+    <div class="overlay"><div class="message" id="statusBox"><h1>Hill Climb Web</h1><p>Fahre über zufällige Hügel. Strecke wird immer schwerer.</p></div></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
+    <script>
+      const { Engine, World, Bodies, Body } = Matter;
+
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+      const distanceEl = document.getElementById('distance');
+      const difficultyEl = document.getElementById('difficulty');
+      const speedEl = document.getElementById('speed');
+      const statusBox = document.getElementById('statusBox');
+
+      const state = {
+        keys: { left: false, right: false, tiltLeft: false, tiltRight: false },
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        gameOver: false,
+        bestX: 0,
+        generatedUntil: -2000,
+      };
+
+      const engine = Engine.create({ gravity: { x: 0, y: 1.08 } });
+      engine.positionIterations = 10;
+      engine.velocityIterations = 8;
+
+      let car;
+      const terrainBodies = [];
+
+      function mulberry32(seed) {
+        return function () {
+          let t = (seed += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      function noise(i) {
+        const r = mulberry32((i + 919) * 31337);
+        return r() * 2 - 1;
+      }
+      function smoothNoise(x) {
+        const i = Math.floor(x);
+        const f = x - i;
+        const a = noise(i);
+        const b = noise(i + 1);
+        const t = f * f * (3 - 2 * f);
+        return a * (1 - t) + b * t;
+      }
+      function difficultyAt(x) {
+        return 1 + Math.max(0, x) / 2300;
+      }
+      function terrainHeight(x) {
+        const p = Math.max(0, x) / 1800;
+        const base = state.viewport.height * 0.72;
+        const amp = 58 + p * 28;
+        const freq = 0.002 + p * 0.0007;
+        return base + smoothNoise(x * freq) * amp + smoothNoise(x * freq * 2.6 + 1600) * amp * 0.35 + Math.sin(x * freq * 0.5) * (14 + p * 9);
+      }
+
+      function buildTerrain(fromX, toX) {
+        const step = 64;
+        for (let x = fromX; x < toX; x += step) {
+          const nx = x + step;
+          const y1 = terrainHeight(x);
+          const y2 = terrainHeight(nx);
+          const mx = (x + nx) / 2;
+          const my = (y1 + y2) / 2;
+          const length = Math.hypot(step, y2 - y1);
+          const angle = Math.atan2(y2 - y1, step);
+          const ground = Bodies.rectangle(mx, my + 72, length + 80, 180, {
+            isStatic: true,
+            angle,
+            friction: 1.1,
+            frictionStatic: 1.2,
+            restitution: 0,
+          });
+          terrainBodies.push(ground);
+          World.add(engine.world, ground);
+        }
+      }
+
+      function ensureTerrain(cameraX) {
+        const target = cameraX + state.viewport.width + 1800;
+        if (state.generatedUntil < target) {
+          const start = state.generatedUntil;
+          state.generatedUntil = target;
+          buildTerrain(start, target);
+        }
+      }
+
+      function trimTerrain(cameraX) {
+        const keepBehind = cameraX - 1800;
+        while (terrainBodies.length && terrainBodies[0].position.x < keepBehind) {
+          World.remove(engine.world, terrainBodies.shift());
+        }
+      }
+
+      function createCar(x, y) {
+        return Bodies.rectangle(x, y, 98, 40, {
+          chamfer: { radius: 10 },
+          friction: 1.0,
+          frictionStatic: 1.2,
+          restitution: 0,
+          density: 0.0025,
+        });
+      }
+
+      function resetGame() {
+        if (car) World.remove(engine.world, car);
+        car = createCar(220, terrainHeight(220) - 100);
+        World.add(engine.world, car);
+        state.bestX = 0;
+        state.gameOver = false;
+        statusBox.classList.remove('hidden');
+        statusBox.innerHTML = '<h1>Hill Climb Web</h1><p>Steuerung funktioniert jetzt stabil. <kbd>R</kbd> für Neustart.</p>';
+      }
+
+      function resize() {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        state.viewport.width = window.innerWidth;
+        state.viewport.height = window.innerHeight;
+        canvas.width = Math.floor(window.innerWidth * dpr);
+        canvas.height = Math.floor(window.innerHeight * dpr);
+        canvas.style.width = `${window.innerWidth}px`;
+        canvas.style.height = `${window.innerHeight}px`;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+      }
+
+      function setupInput() {
+        window.addEventListener('keydown', (e) => {
+          if (e.code === 'ArrowLeft') state.keys.left = true;
+          if (e.code === 'ArrowRight') state.keys.right = true;
+          if (e.code === 'KeyA') state.keys.tiltLeft = true;
+          if (e.code === 'KeyD') state.keys.tiltRight = true;
+          if (e.code === 'KeyR') resetGame();
+        });
+        window.addEventListener('keyup', (e) => {
+          if (e.code === 'ArrowLeft') state.keys.left = false;
+          if (e.code === 'ArrowRight') state.keys.right = false;
+          if (e.code === 'KeyA') state.keys.tiltLeft = false;
+          if (e.code === 'KeyD') state.keys.tiltRight = false;
+        });
+      }
+
+      function applyControls() {
+        if (!car || state.gameOver) return;
+        const accel = (state.keys.right ? 1 : 0) - (state.keys.left ? 1 : 0);
+        const tilt = (state.keys.tiltRight ? 1 : 0) - (state.keys.tiltLeft ? 1 : 0);
+        const diff = difficultyAt(state.bestX);
+
+        Body.applyForce(car, car.position, { x: accel * 0.0012 * diff, y: 0 });
+        Body.setAngularVelocity(car, car.angularVelocity * 0.97 + tilt * 0.0045);
+
+        const maxVX = 14 + diff * 1.6;
+        if (Math.abs(car.velocity.x) > maxVX) {
+          Body.setVelocity(car, { x: Math.sign(car.velocity.x) * maxVX, y: car.velocity.y });
+        }
+      }
+
+      function updateState() {
+        if (!car) return;
+        state.bestX = Math.max(state.bestX, car.position.x);
+
+        const crashed = Math.abs(car.angle) > 2.7 || car.position.y > terrainHeight(car.position.x) + 420;
+        if (!state.gameOver && crashed) {
+          state.gameOver = true;
+          statusBox.classList.remove('hidden');
+          statusBox.innerHTML = `<h1>Crash!</h1><p>${Math.max(0, Math.floor(state.bestX / 10))} m geschafft. <kbd>R</kbd> zum Neustart.</p>`;
+        }
+
+        if (!state.gameOver && state.bestX > 160) statusBox.classList.add('hidden');
+      }
+
+      function drawBackground(cameraX, cameraY) {
+        const w = state.viewport.width;
+        const h = state.viewport.height;
+        const g = ctx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, '#173054');
+        g.addColorStop(1, '#0d1424');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.fillStyle = 'rgba(255,255,255,.08)';
+        for (let i = 0; i < 7; i++) {
+          const mx = ((i * 340 - cameraX * 0.15) % (w + 240)) - 120;
+          const my = 120 + (i % 3) * 42 - cameraY * 0.05;
+          ctx.beginPath();
+          ctx.arc(mx, my, 40 + (i % 2) * 18, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function drawTerrain(cameraX, cameraY) {
+        const start = cameraX - 220;
+        const end = cameraX + state.viewport.width + 260;
+
+        ctx.beginPath();
+        for (let x = start; x <= end; x += 20) {
+          const y = terrainHeight(x) - cameraY;
+          if (x === start) ctx.moveTo(x - cameraX, y);
+          else ctx.lineTo(x - cameraX, y);
+        }
+        const firstY = terrainHeight(start) - cameraY;
+        ctx.lineTo(end - cameraX, state.viewport.height + 220);
+        ctx.lineTo(start - cameraX, state.viewport.height + 220);
+        ctx.lineTo(start - cameraX, firstY);
+
+        const fill = ctx.createLinearGradient(0, state.viewport.height * 0.45, 0, state.viewport.height + 120);
+        fill.addColorStop(0, '#4aa964');
+        fill.addColorStop(1, '#2d5f3a');
+        ctx.fillStyle = fill;
+        ctx.fill();
+
+        ctx.beginPath();
+        for (let x = start; x <= end; x += 20) {
+          const y = terrainHeight(x) - cameraY;
+          if (x === start) ctx.moveTo(x - cameraX, y);
+          else ctx.lineTo(x - cameraX, y);
+        }
+        ctx.strokeStyle = '#97f3b2';
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      }
+
+      function drawCar(cameraX, cameraY) {
+        const x = car.position.x - cameraX;
+        const y = car.position.y - cameraY;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(car.angle);
+        ctx.fillStyle = '#ffc24c';
+        ctx.fillRect(-49, -20, 98, 40);
+        ctx.fillStyle = '#d5911f';
+        ctx.fillRect(4, -31, 30, 11);
+        ctx.fillStyle = '#8ddbff';
+        ctx.fillRect(9, -28, 20, 8);
+        ctx.restore();
+      }
+
+      function updateHud() {
+        distanceEl.textContent = `${Math.max(0, Math.floor(state.bestX / 10))} m`;
+        difficultyEl.textContent = `${difficultyAt(state.bestX).toFixed(2)}x`;
+        speedEl.textContent = `${Math.max(0, Math.round(car.velocity.x * 9.2))} km/h`;
+      }
+
+      function frame() {
+        applyControls();
+        Engine.update(engine, 1000 / 60);
+        updateState();
+
+        const cameraX = Math.max(0, car.position.x - state.viewport.width * 0.3);
+        const cameraY = car.position.y - state.viewport.height * 0.4;
+
+        ensureTerrain(cameraX);
+        trimTerrain(cameraX);
+
+        drawBackground(cameraX, cameraY);
+        drawTerrain(cameraX, cameraY);
+        drawCar(cameraX, cameraY);
+        updateHud();
+        requestAnimationFrame(frame);
+      }
+
+      function init() {
+        resize();
+        setupInput();
+        state.generatedUntil = -2000;
+        buildTerrain(-2000, 4200);
+        state.generatedUntil = 4200;
+        resetGame();
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener('resize', resize);
+      init();
+    </script>
+  </body>
+</html>
