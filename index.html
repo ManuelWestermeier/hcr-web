@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hill Climb Web</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: radial-gradient(circle at top, #16263f 0%, #0d1324 45%, #090d18 100%);
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      .hud {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.75rem 1rem;
+        color: #e8f4ff;
+        pointer-events: none;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+      }
+      .panel {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+        background: rgba(6, 12, 24, 0.45);
+        border: 1px solid rgba(170, 211, 255, 0.25);
+        border-radius: 12px;
+        padding: 0.5rem 0.75rem;
+        backdrop-filter: blur(2px);
+      }
+      .label {
+        opacity: 0.75;
+        font-size: 0.8rem;
+      }
+      .value {
+        font-weight: 700;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        pointer-events: none;
+      }
+      .message {
+        text-align: center;
+        max-width: min(92vw, 620px);
+        padding: 1rem 1.25rem;
+        border-radius: 14px;
+        border: 1px solid rgba(155, 215, 255, 0.35);
+        background: rgba(10, 18, 32, 0.72);
+        color: #f0f8ff;
+        line-height: 1.45;
+      }
+      .message h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.3rem;
+      }
+      .message p {
+        margin: 0.25rem 0;
+      }
+      kbd {
+        border: 1px solid rgba(207, 230, 255, 0.45);
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 0.1rem 0.35rem;
+        font-size: 0.85em;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .hidden {
+        opacity: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div class="hud">
+      <div class="panel">
+        <div>
+          <div class="label">Distanz</div>
+          <div class="value" id="distance">0 m</div>
+        </div>
+        <div>
+          <div class="label">Schwierigkeit</div>
+          <div class="value" id="difficulty">1.00x</div>
+        </div>
+        <div>
+          <div class="label">Geschwindigkeit</div>
+          <div class="value" id="speed">0 km/h</div>
+        </div>
+      </div>
+      <div class="panel">
+        <div>
+          <div class="label">Steuerung</div>
+          <div class="value"><kbd>A</kbd>/<kbd>D</kbd> oder <kbd>←</kbd>/<kbd>→</kbd>, <kbd>R</kbd> = Neustart</div>
+        </div>
+      </div>
+    </div>
+    <div class="overlay">
+      <div class="message" id="statusBox">
+        <h1>Hill Climb Web</h1>
+        <p>Fahre so weit wie möglich über eine <strong>zufällige Strecke</strong>, die immer schwieriger wird.</p>
+        <p>Halte das Auto stabil und gib sanft Gas, wenn die Hügel steiler werden.</p>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
+    <script>
+      const { Engine, World, Bodies, Body, Composite, Constraint, Events } = Matter;
+
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+      const distanceEl = document.getElementById('distance');
+      const difficultyEl = document.getElementById('difficulty');
+      const speedEl = document.getElementById('speed');
+      const statusBox = document.getElementById('statusBox');
+
+      const state = {
+        keys: { left: false, right: false },
+        gameOver: false,
+        generatedUntil: -800,
+        playerBestX: 0,
+        failedAt: 0,
+      };
+
+      const engine = Engine.create({
+        gravity: { x: 0, y: 1.05 },
+        positionIterations: 8,
+        velocityIterations: 6,
+      });
+
+      const terrainBodies = [];
+      let car = null;
+      let wheelL = null;
+      let wheelR = null;
+
+      const worldHeight = () => canvas.height;
+      const worldWidth = () => canvas.width;
+
+      function mulberry32(seed) {
+        return function () {
+          let t = (seed += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function noise1D(i) {
+        const random = mulberry32((i + 1337) * 92821);
+        return random() * 2 - 1;
+      }
+
+      function smoothNoise(x) {
+        const i = Math.floor(x);
+        const f = x - i;
+        const a = noise1D(i);
+        const b = noise1D(i + 1);
+        const smooth = f * f * (3 - 2 * f);
+        return a * (1 - smooth) + b * smooth;
+      }
+
+      function terrainHeight(x) {
+        const base = canvas.height * 0.73;
+        const progression = Math.max(0, x) / 1800;
+        const amplitude = 70 + progression * 28;
+        const frequency = 0.0022 + progression * 0.00075;
+
+        const rolling = smoothNoise(x * frequency) * amplitude;
+        const jagged = smoothNoise(x * frequency * 2.9 + 1000) * amplitude * 0.42;
+        const steps = Math.sin(x * (frequency * 0.45)) * (18 + progression * 10);
+
+        return base + rolling + jagged + steps;
+      }
+
+      function difficultyAt(x) {
+        return 1 + Math.max(0, x) / 2200;
+      }
+
+      function generateTerrainChunk(fromX, toX) {
+        const segment = 60;
+        for (let x = fromX; x < toX; x += segment) {
+          const nextX = x + segment;
+          const y1 = terrainHeight(x);
+          const y2 = terrainHeight(nextX);
+          const midX = (x + nextX) / 2;
+          const midY = (y1 + y2) / 2;
+          const length = Math.hypot(segment, y2 - y1);
+          const angle = Math.atan2(y2 - y1, segment);
+
+          const ground = Bodies.rectangle(midX, midY + 24, length + 6, 56, {
+            isStatic: true,
+            angle,
+            friction: 0.92,
+            restitution: 0,
+          });
+          ground.renderColor = '#3f8f53';
+          terrainBodies.push(ground);
+          World.add(engine.world, ground);
+        }
+      }
+
+      function trimTerrain(cameraX) {
+        const keepBehind = cameraX - 1400;
+        while (terrainBodies.length > 0 && terrainBodies[0].position.x < keepBehind) {
+          const body = terrainBodies.shift();
+          World.remove(engine.world, body);
+        }
+      }
+
+      function ensureTerrain(cameraX) {
+        const target = cameraX + worldWidth() + 1600;
+        if (state.generatedUntil < target) {
+          const start = state.generatedUntil;
+          state.generatedUntil = target;
+          generateTerrainChunk(start, target);
+        }
+      }
+
+      function createCar(x, y) {
+        const chassis = Bodies.rectangle(x, y, 125, 32, {
+          friction: 0.5,
+          restitution: 0,
+          density: 0.0026,
+        });
+        chassis.renderColor = '#f4b53f';
+
+        const leftWheel = Bodies.circle(x - 42, y + 25, 24, {
+          friction: 1.4,
+          restitution: 0,
+          density: 0.0024,
+        });
+        leftWheel.renderColor = '#dfe8ef';
+
+        const rightWheel = Bodies.circle(x + 42, y + 25, 24, {
+          friction: 1.4,
+          restitution: 0,
+          density: 0.0024,
+        });
+        rightWheel.renderColor = '#dfe8ef';
+
+        const axleL = Constraint.create({
+          bodyA: chassis,
+          pointA: { x: -42, y: 14 },
+          bodyB: leftWheel,
+          stiffness: 0.75,
+          damping: 0.18,
+          length: 10,
+        });
+
+        const axleR = Constraint.create({
+          bodyA: chassis,
+          pointA: { x: 42, y: 14 },
+          bodyB: rightWheel,
+          stiffness: 0.75,
+          damping: 0.18,
+          length: 10,
+        });
+
+        World.add(engine.world, [chassis, leftWheel, rightWheel, axleL, axleR]);
+        return { chassis, leftWheel, rightWheel, axleL, axleR };
+      }
+
+      function resetGame() {
+        if (car) {
+          World.remove(engine.world, [car.chassis, car.leftWheel, car.rightWheel, car.axleL, car.axleR]);
+        }
+
+        car = createCar(180, terrainHeight(180) - 90);
+        wheelL = car.leftWheel;
+        wheelR = car.rightWheel;
+        state.playerBestX = 0;
+        state.gameOver = false;
+        state.failedAt = 0;
+        statusBox.classList.remove('hidden');
+        statusBox.innerHTML = `
+          <h1>Hill Climb Web</h1>
+          <p>Fahre so weit wie möglich über eine <strong>zufällige Strecke</strong>, die immer schwieriger wird.</p>
+          <p>Drücke <kbd>R</kbd>, wenn du neu starten willst.</p>
+        `;
+      }
+
+      function resize() {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        canvas.width = Math.floor(window.innerWidth * dpr);
+        canvas.height = Math.floor(window.innerHeight * dpr);
+        canvas.style.width = `${window.innerWidth}px`;
+        canvas.style.height = `${window.innerHeight}px`;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+      }
+
+      function setupInput() {
+        window.addEventListener('keydown', (e) => {
+          if (e.code === 'ArrowLeft' || e.code === 'KeyA') state.keys.left = true;
+          if (e.code === 'ArrowRight' || e.code === 'KeyD') state.keys.right = true;
+          if (e.code === 'KeyR') resetGame();
+        });
+        window.addEventListener('keyup', (e) => {
+          if (e.code === 'ArrowLeft' || e.code === 'KeyA') state.keys.left = false;
+          if (e.code === 'ArrowRight' || e.code === 'KeyD') state.keys.right = false;
+        });
+      }
+
+      function updateControls() {
+        if (!wheelL || !wheelR || state.gameOver) return;
+
+        const throttle = (state.keys.right ? 1 : 0) - (state.keys.left ? 1 : 0);
+        const speed = car.chassis.velocity.x;
+        const diff = difficultyAt(state.playerBestX);
+        const torque = 0.0032 * diff;
+        const drag = 0.95;
+
+        if (throttle !== 0) {
+          Body.setAngularVelocity(wheelL, wheelL.angularVelocity + throttle * torque);
+          Body.setAngularVelocity(wheelR, wheelR.angularVelocity + throttle * torque);
+        } else {
+          Body.setAngularVelocity(wheelL, wheelL.angularVelocity * drag);
+          Body.setAngularVelocity(wheelR, wheelR.angularVelocity * drag);
+        }
+
+        Body.applyForce(car.chassis, car.chassis.position, { x: speed * -0.000012, y: 0 });
+      }
+
+      function updateGameState() {
+        if (!car) return;
+        const x = car.chassis.position.x;
+        state.playerBestX = Math.max(state.playerBestX, x);
+
+        const upsideDown = Math.abs(car.chassis.angle) > Math.PI * 0.78;
+        const offTrack = car.chassis.position.y > terrainHeight(x) + 240;
+
+        if (!state.gameOver && (upsideDown || offTrack)) {
+          state.gameOver = true;
+          state.failedAt = performance.now();
+          statusBox.classList.remove('hidden');
+          statusBox.innerHTML = `
+            <h1>Crash!</h1>
+            <p>Du hast <strong>${Math.max(0, Math.floor(state.playerBestX / 10))} m</strong> geschafft.</p>
+            <p>Drücke <kbd>R</kbd> für einen neuen Lauf mit frischer Zufalls-Strecke.</p>
+          `;
+        }
+
+        if (!state.gameOver && state.playerBestX > 120) {
+          statusBox.classList.add('hidden');
+        }
+      }
+
+      function drawTerrain(cameraX) {
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = '#5ec478';
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+
+        const startX = cameraX - 200;
+        const endX = cameraX + window.innerWidth + 240;
+        for (let x = startX; x <= endX; x += 25) {
+          const y = terrainHeight(x);
+          if (x === startX) ctx.moveTo(x - cameraX, y);
+          else ctx.lineTo(x - cameraX, y);
+        }
+        ctx.stroke();
+
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = 'rgba(166, 255, 191, 0.45)';
+        ctx.stroke();
+      }
+
+      function drawWheel(wheel, cameraX) {
+        const x = wheel.position.x - cameraX;
+        const y = wheel.position.y;
+        const r = wheel.circleRadius;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(wheel.angle);
+        ctx.fillStyle = '#d6e2eb';
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#303c49';
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.56, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#9cb0c2';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.7, 0);
+        ctx.lineTo(r * 0.7, 0);
+        ctx.moveTo(0, -r * 0.7);
+        ctx.lineTo(0, r * 0.7);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawCar(cameraX) {
+        if (!car) return;
+
+        drawWheel(car.leftWheel, cameraX);
+        drawWheel(car.rightWheel, cameraX);
+
+        const c = car.chassis;
+        ctx.save();
+        ctx.translate(c.position.x - cameraX, c.position.y);
+        ctx.rotate(c.angle);
+
+        ctx.fillStyle = '#ffbd47';
+        ctx.fillRect(-62, -16, 124, 32);
+
+        ctx.fillStyle = '#d18d1c';
+        ctx.fillRect(8, -30, 38, 14);
+
+        ctx.fillStyle = '#8dd8ff';
+        ctx.fillRect(13, -27, 28, 10);
+
+        ctx.fillStyle = '#f7f2e3';
+        ctx.beginPath();
+        ctx.arc(-24, -2, 9, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      function drawBackground(cameraX) {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        const gradient = ctx.createLinearGradient(0, 0, 0, h);
+        gradient.addColorStop(0, '#162b4a');
+        gradient.addColorStop(0.45, '#1a2a46');
+        gradient.addColorStop(1, '#0f1524');
+
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        for (let i = 0; i < 7; i++) {
+          const mx = ((i * 370 - cameraX * 0.2) % (w + 300)) - 150;
+          const my = 120 + (i % 3) * 36;
+          ctx.beginPath();
+          ctx.arc(mx, my, 45 + (i % 2) * 20, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function updateHud() {
+        const distance = Math.max(0, Math.floor(state.playerBestX / 10));
+        const diff = difficultyAt(state.playerBestX);
+        const speed = car ? Math.max(0, Math.round(car.chassis.velocity.x * 9.5)) : 0;
+
+        distanceEl.textContent = `${distance} m`;
+        difficultyEl.textContent = `${diff.toFixed(2)}x`;
+        speedEl.textContent = `${speed} km/h`;
+      }
+
+      function frame() {
+        Engine.update(engine, 1000 / 60);
+
+        updateControls();
+        updateGameState();
+
+        const cameraX = Math.max(0, (car?.chassis.position.x || 0) - window.innerWidth * 0.28);
+        ensureTerrain(cameraX);
+        trimTerrain(cameraX);
+
+        drawBackground(cameraX);
+        drawTerrain(cameraX);
+        drawCar(cameraX);
+        updateHud();
+
+        requestAnimationFrame(frame);
+      }
+
+      function init() {
+        resize();
+        setupInput();
+
+        state.generatedUntil = -1000;
+        generateTerrainChunk(-1000, 3000);
+        state.generatedUntil = 3000;
+
+        resetGame();
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener('resize', resize);
+      Events.on(engine, 'afterUpdate', () => {
+        if (state.gameOver && performance.now() - state.failedAt > 1200) {
+          Body.setVelocity(car.chassis, { x: 0, y: car.chassis.velocity.y });
+          Body.setAngularVelocity(car.chassis, 0);
+          Body.setAngularVelocity(car.leftWheel, car.leftWheel.angularVelocity * 0.95);
+          Body.setAngularVelocity(car.rightWheel, car.rightWheel.angularVelocity * 0.95);
+        }
+      });
+
+      init();
+    </script>
+  </body>
+</html>
