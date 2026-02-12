@@ -121,7 +121,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
     <script>
-      const { Engine, World, Bodies, Body, Composite, Constraint, Events } = Matter;
+      const { Engine, World, Bodies, Body, Constraint, Events } = Matter;
 
       const canvas = document.getElementById('game');
       const ctx = canvas.getContext('2d');
@@ -136,6 +136,7 @@
         generatedUntil: -800,
         playerBestX: 0,
         failedAt: 0,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
       };
 
       const engine = Engine.create({
@@ -149,8 +150,7 @@
       let wheelL = null;
       let wheelR = null;
 
-      const worldHeight = () => canvas.height;
-      const worldWidth = () => canvas.width;
+      const worldWidth = () => state.viewport.width;
 
       function mulberry32(seed) {
         return function () {
@@ -176,7 +176,7 @@
       }
 
       function terrainHeight(x) {
-        const base = canvas.height * 0.73;
+        const base = state.viewport.height * 0.73;
         const progression = Math.max(0, x) / 1800;
         const amplitude = 70 + progression * 28;
         const frequency = 0.0022 + progression * 0.00075;
@@ -297,6 +297,8 @@
 
       function resize() {
         const dpr = Math.max(1, window.devicePixelRatio || 1);
+        state.viewport.width = window.innerWidth;
+        state.viewport.height = window.innerHeight;
         canvas.width = Math.floor(window.innerWidth * dpr);
         canvas.height = Math.floor(window.innerHeight * dpr);
         canvas.style.width = `${window.innerWidth}px`;
@@ -361,7 +363,7 @@
         }
       }
 
-      function drawTerrain(cameraX) {
+      function drawTerrain(cameraX, cameraY) {
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.strokeStyle = '#5ec478';
@@ -372,8 +374,8 @@
         const endX = cameraX + window.innerWidth + 240;
         for (let x = startX; x <= endX; x += 25) {
           const y = terrainHeight(x);
-          if (x === startX) ctx.moveTo(x - cameraX, y);
-          else ctx.lineTo(x - cameraX, y);
+          if (x === startX) ctx.moveTo(x - cameraX, y - cameraY);
+          else ctx.lineTo(x - cameraX, y - cameraY);
         }
         ctx.stroke();
 
@@ -382,9 +384,9 @@
         ctx.stroke();
       }
 
-      function drawWheel(wheel, cameraX) {
+      function drawWheel(wheel, cameraX, cameraY) {
         const x = wheel.position.x - cameraX;
-        const y = wheel.position.y;
+        const y = wheel.position.y - cameraY;
         const r = wheel.circleRadius;
 
         ctx.save();
@@ -411,15 +413,15 @@
         ctx.restore();
       }
 
-      function drawCar(cameraX) {
+      function drawCar(cameraX, cameraY) {
         if (!car) return;
 
-        drawWheel(car.leftWheel, cameraX);
-        drawWheel(car.rightWheel, cameraX);
+        drawWheel(car.leftWheel, cameraX, cameraY);
+        drawWheel(car.rightWheel, cameraX, cameraY);
 
         const c = car.chassis;
         ctx.save();
-        ctx.translate(c.position.x - cameraX, c.position.y);
+        ctx.translate(c.position.x - cameraX, c.position.y - cameraY);
         ctx.rotate(c.angle);
 
         ctx.fillStyle = '#ffbd47';
@@ -439,7 +441,7 @@
         ctx.restore();
       }
 
-      function drawBackground(cameraX) {
+      function drawBackground(cameraX, cameraY) {
         const w = window.innerWidth;
         const h = window.innerHeight;
         const gradient = ctx.createLinearGradient(0, 0, 0, h);
@@ -453,7 +455,7 @@
         ctx.fillStyle = 'rgba(255,255,255,0.06)';
         for (let i = 0; i < 7; i++) {
           const mx = ((i * 370 - cameraX * 0.2) % (w + 300)) - 150;
-          const my = 120 + (i % 3) * 36;
+          const my = 120 + (i % 3) * 36 - cameraY * 0.06;
           ctx.beginPath();
           ctx.arc(mx, my, 45 + (i % 2) * 20, 0, Math.PI * 2);
           ctx.fill();
@@ -476,13 +478,14 @@
         updateControls();
         updateGameState();
 
-        const cameraX = Math.max(0, (car?.chassis.position.x || 0) - window.innerWidth * 0.28);
+        const cameraX = Math.max(0, (car?.chassis.position.x || 0) - state.viewport.width * 0.3);
+        const cameraY = (car?.chassis.position.y || 0) - state.viewport.height * 0.4;
         ensureTerrain(cameraX);
         trimTerrain(cameraX);
 
-        drawBackground(cameraX);
-        drawTerrain(cameraX);
-        drawCar(cameraX);
+        drawBackground(cameraX, cameraY);
+        drawTerrain(cameraX, cameraY);
+        drawCar(cameraX, cameraY);
         updateHud();
 
         requestAnimationFrame(frame);
